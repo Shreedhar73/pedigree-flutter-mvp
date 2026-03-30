@@ -35,6 +35,10 @@ class _CanvasScreenState extends State<CanvasScreen> {
   double _scale = 1.0;
   Offset _pan = Offset.zero;
 
+  // Pinch-zoom gesture state (prevents compounding scale each update).
+  double? _gestureStartScale;
+  Offset? _gestureStartFocalWorld;
+
   _CanvasTool _canvasTool = _CanvasTool.connect;
 
   int? _selectedPersonId;
@@ -62,6 +66,9 @@ class _CanvasScreenState extends State<CanvasScreen> {
   /// Tracks pointer-down positions so taps are recognized even when the scale
   /// recognizer wins (e.g. tapping thin relationship lines).
   final Map<int, Offset> _pointerDownLocal = {};
+
+  DateTime? _lastTapUpAt;
+  Offset? _lastTapUpLocal;
 
   Offset _toWorld(Offset local) {
     return (local - _pan) / _scale;
@@ -322,7 +329,25 @@ class _CanvasScreenState extends State<CanvasScreen> {
                         if ((e.localPosition - start).distance > kTouchSlop) {
                           return;
                         }
-                        _handleCanvasTap(e.localPosition, snapshot);
+                        final now = DateTime.now();
+                        final lastAt = _lastTapUpAt;
+                        final lastPos = _lastTapUpLocal;
+                        final isDoubleTap =
+                            lastAt != null &&
+                            lastPos != null &&
+                            now.difference(lastAt) <
+                                const Duration(milliseconds: 350) &&
+                            (e.localPosition - lastPos).distance <
+                                (kTouchSlop * 2);
+
+                        if (isDoubleTap) {
+                          _lastTapUpAt = null;
+                          _lastTapUpLocal = null;
+                          _handleCanvasTap(e.localPosition, snapshot);
+                        } else {
+                          _lastTapUpAt = now;
+                          _lastTapUpLocal = e.localPosition;
+                        }
                       },
                       onPointerCancel: (e) {
                         _pointerDownLocal.remove(e.pointer);
@@ -331,6 +356,8 @@ class _CanvasScreenState extends State<CanvasScreen> {
                         behavior: HitTestBehavior.opaque,
                         onScaleStart: (d) {
                           final world = _toWorld(d.localFocalPoint);
+                          _gestureStartScale = _scale;
+                          _gestureStartFocalWorld = world;
                           if (d.pointerCount > 1) {
                             setState(() {
                               _lineFromPersonId = null;
@@ -456,19 +483,28 @@ class _CanvasScreenState extends State<CanvasScreen> {
                             return;
                           }
 
-                          final nextScale = (_scale * d.scale).clamp(0.2, 4.0);
-                          final local = d.localFocalPoint;
-                          final before = _toWorld(local);
-                          _scale = nextScale;
-                          final after = _toWorld(local);
-                          _pan += (after - before) * _scale;
-
-                          if (d.pointerCount == 1) {
+                          // One-finger panning (no scale change).
+                          if (d.pointerCount == 1 && d.scale == 1.0) {
                             _pan += d.focalPointDelta;
+                            setState(() {});
+                            return;
                           }
+
+                          // Pinch zoom (two+ pointers). Note: [ScaleUpdateDetails.scale]
+                          // is relative to the start of the gesture, so use the stored
+                          // start-scale to avoid compounding scale each update.
+                          final startScale = _gestureStartScale ?? _scale;
+                          final focalWorld = _gestureStartFocalWorld ?? world;
+
+                          _scale = (startScale * d.scale).clamp(0.2, 10.0);
+
+                          // Keep the original world focal point under the current finger.
+                          _pan = d.localFocalPoint - (focalWorld * _scale);
                           setState(() {});
                         },
                         onScaleEnd: (d) {
+                          _gestureStartScale = null;
+                          _gestureStartFocalWorld = null;
                           final endWorld = _lastWorldDuringDrag;
 
                           if (_lineFromPersonId != null) {
